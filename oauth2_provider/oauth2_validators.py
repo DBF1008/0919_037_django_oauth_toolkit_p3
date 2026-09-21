@@ -1,12 +1,12 @@
 import base64
 import binascii
-import hashlib
 import http.client
 import inspect
 import json
 import logging
 import uuid
 from collections import OrderedDict
+from contextlib import suppress
 from datetime import datetime, timedelta
 from datetime import timezone as datetime_timezone
 from urllib.parse import unquote_plus
@@ -15,6 +15,7 @@ import requests
 from django.conf import settings
 from django.contrib.auth import authenticate, get_user_model
 from django.contrib.auth.hashers import check_password, identify_hasher
+from django.core.cache import cache
 from django.core.exceptions import ObjectDoesNotExist
 from django.db import router, transaction
 from django.http import HttpRequest
@@ -36,6 +37,7 @@ from .models import (
     get_grant_model,
     get_id_token_model,
     get_refresh_token_model,
+    hash_access_token,
 )
 from .scopes import get_scopes_backend
 from .settings import oauth2_settings
@@ -43,6 +45,11 @@ from .utils import get_timezone
 
 
 log = logging.getLogger("oauth2_provider")
+
+
+def _access_token_plaintext_cache_key(stored_token):
+    return f"oauth2_provider:access_token_plaintext:{stored_token}"
+
 
 GRANT_TYPE_MAPPING = {
     "authorization_code": (
@@ -452,11 +459,9 @@ class OAuth2Validator(RequestValidator):
             if not settings.USE_TZ:
                 expires = timezone.make_naive(expires, expires.tzinfo)
 
-            token_checksum = hashlib.sha256(token.encode("utf-8")).hexdigest()
             access_token, _created = AccessToken.objects.update_or_create(
-                token_checksum=token_checksum,
+                token=hash_access_token(token),
                 defaults={
-                    "token": token,
                     "user": user,
                     "application": None,
                     "scope": scope,
@@ -499,12 +504,10 @@ class OAuth2Validator(RequestValidator):
             return False
 
     def _load_access_token(self, token):
-        token_checksum = hashlib.sha256(token.encode("utf-8")).hexdigest()
-        return (
-            AccessToken.objects.select_related("application", "user")
-            .filter(token_checksum=token_checksum)
-            .first()
-        )
+        try:
+            return AccessToken.get_by_token(token)
+        except AccessToken.DoesNotExist:
+            return None
 
     def validate_code(self, client_id, code, client, request, *args, **kwargs):
         try:
@@ -704,7 +707,19 @@ class OAuth2Validator(RequestValidator):
                 else:
                     # make sure that the token data we're returning matches
                     # the existing token
-                    token["access_token"] = previous_access_token.token
+                    plaintext_token = cache.get(
+                        _access_token_plaintext_cache_key(previous_access_token.token)
+                    )
+                    if plaintext_token is None:
+                        # The plaintext of the previously issued token is no
+                        # longer available from the cache (only its digest is
+                        # stored in the database), so replace the stored token
+                        # with the newly generated one to keep the response valid.
+                        previous_access_token.token = token["access_token"]
+                        previous_access_token.save()
+                        self._cache_access_token_plaintext(token["access_token"])
+                    else:
+                        token["access_token"] = plaintext_token
                     token["refresh_token"] = (
                         RefreshToken.objects.filter(access_token=previous_access_token).first().token
                     )
@@ -718,7 +733,7 @@ class OAuth2Validator(RequestValidator):
         id_token = token.get("id_token", None)
         if id_token:
             id_token = self._load_id_token(id_token)
-        return AccessToken.objects.create(
+        access_token = AccessToken.objects.create(
             user=request.user,
             scope=token["scope"],
             expires=expires,
@@ -727,6 +742,25 @@ class OAuth2Validator(RequestValidator):
             application=request.client,
             source_refresh_token=source_refresh_token,
         )
+        if source_refresh_token is not None:
+            self._cache_access_token_plaintext(token["access_token"])
+        return access_token
+
+    @staticmethod
+    def _cache_access_token_plaintext(plaintext_token):
+        """
+        Keep the plaintext of a freshly issued access token available for the
+        refresh token grace period so that repeated refresh requests can be
+        answered with the same token. Only the digest is stored in the
+        database, so without this the original token value is unrecoverable.
+        """
+        grace_period = oauth2_settings.REFRESH_TOKEN_GRACE_PERIOD_SECONDS
+        if grace_period > 0:
+            cache.set(
+                _access_token_plaintext_cache_key(hash_access_token(plaintext_token)),
+                plaintext_token,
+                timeout=grace_period,
+            )
 
     def _create_authorization_code(self, request, code, expires=None):
         if not expires:
@@ -775,11 +809,17 @@ class OAuth2Validator(RequestValidator):
 
         token_type = token_types.get(token_type_hint, AccessToken)
         try:
-            token_type.objects.get(token=token).revoke()
+            if token_type is AccessToken:
+                AccessToken.get_by_token(token).revoke()
+            else:
+                token_type.objects.get(token=token).revoke()
         except ObjectDoesNotExist:
             for other_type in [_t for _t in token_types.values() if _t != token_type]:
-                # slightly inefficient on Python2, but the queryset contains only one instance
-                list(map(lambda t: t.revoke(), other_type.objects.filter(token=token)))
+                if other_type is AccessToken:
+                    with suppress(AccessToken.DoesNotExist):
+                        AccessToken.get_by_token(token).revoke()
+                else:
+                    list(map(lambda t: t.revoke(), other_type.objects.filter(token=token)))
 
     def validate_user(self, username, password, client, request, *args, **kwargs):
         """

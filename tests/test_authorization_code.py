@@ -7,6 +7,7 @@ from urllib.parse import parse_qs, urlparse
 import pytest
 from django.conf import settings
 from django.contrib.auth import get_user_model
+from django.core.cache import cache
 from django.test import RequestFactory
 from django.urls import reverse
 from django.utils import timezone
@@ -872,6 +873,47 @@ class TestAuthorizationCodeTokenView(BaseAuthorizationCodeTokenView):
         self.assertTrue("refresh_token" in content)
         self.assertEqual(content["refresh_token"], first_refresh_token)
 
+    def test_refresh_with_grace_period_cache_miss_issues_new_token(self):
+        """
+        When the plaintext of the previously issued access token is no longer
+        available from the cache, a repeated refresh within the grace period
+        returns the newly generated access token instead of a stored digest.
+        """
+        self.oauth2_settings.REFRESH_TOKEN_GRACE_PERIOD_SECONDS = 120
+        self.client.login(username="test_user", password="123456")
+        authorization_code = self.get_auth()
+
+        token_request_data = {
+            "grant_type": "authorization_code",
+            "code": authorization_code,
+            "redirect_uri": "http://example.org",
+        }
+        auth_headers = get_basic_auth_header(self.application.client_id, CLEARTEXT_SECRET)
+
+        response = self.client.post(reverse("oauth2_provider:token"), data=token_request_data, **auth_headers)
+        content = json.loads(response.content.decode("utf-8"))
+
+        token_request_data = {
+            "grant_type": "refresh_token",
+            "refresh_token": content["refresh_token"],
+            "scope": content["scope"],
+        }
+        response = self.client.post(reverse("oauth2_provider:token"), data=token_request_data, **auth_headers)
+        self.assertEqual(response.status_code, 200)
+        first_access_token = json.loads(response.content.decode("utf-8"))["access_token"]
+
+        # simulate the plaintext falling out of the cache (e.g. cache flush)
+        cache.clear()
+
+        response = self.client.post(reverse("oauth2_provider:token"), data=token_request_data, **auth_headers)
+        self.assertEqual(response.status_code, 200)
+        content = json.loads(response.content.decode("utf-8"))
+        self.assertTrue("access_token" in content)
+        second_access_token = content["access_token"]
+        self.assertNotEqual(second_access_token, first_access_token)
+        # the returned token must be a usable bearer token
+        self.assertTrue(AccessToken.get_by_token(second_access_token).is_valid())
+
     def test_refresh_invalidates_old_tokens(self):
         """
         Ensure existing refresh tokens are cleaned up when issuing new ones
@@ -902,7 +944,8 @@ class TestAuthorizationCodeTokenView(BaseAuthorizationCodeTokenView):
 
         refresh_token = RefreshToken.objects.filter(token=rt).first()
         self.assertIsNotNone(refresh_token.revoked)
-        self.assertFalse(AccessToken.objects.filter(token=at).exists())
+        with self.assertRaises(AccessToken.DoesNotExist):
+            AccessToken.get_by_token(at)
 
     def test_refresh_no_scopes(self):
         """
@@ -1188,7 +1231,7 @@ class TestAuthorizationCodeTokenView(BaseAuthorizationCodeTokenView):
         }
 
         # delete the access token
-        AccessToken.objects.filter(token=content["access_token"]).delete()
+        AccessToken.get_by_token(content["access_token"]).delete()
 
         response = self.client.post(reverse("oauth2_provider:token"), data=token_request_data, **auth_headers)
         self.assertEqual(response.status_code, 400)

@@ -291,6 +291,15 @@ The number of seconds an authorization token received from the introspection end
 If the expire time of the received token is less than ``RESOURCE_SERVER_TOKEN_CACHING_SECONDS`` the expire time
 will be used.
 
+INTROSPECTION_CACHE_SECONDS
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+The number of seconds the introspection endpoint (:rfc:`7662`) caches its responses, keyed by the
+SHA-256 digest of the introspected token. Repeated introspection of the same token is served from
+Django's cache framework instead of querying the database again. Defaults to ``60``; set to ``0``
+to disable caching. Note that a revoked or expired token may be reported as ``active`` for up to
+this many seconds, and that a shared cache backend (e.g. Redis or Memcached) is required to benefit
+from caching across multiple processes.
+
 AUTHENTICATION_SERVER_EXP_TIME_ZONE
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 .. deprecated:: 3.3.1

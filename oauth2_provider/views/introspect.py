@@ -1,13 +1,14 @@
 import calendar
-import hashlib
 
+from django.core.cache import cache
 from django.core.exceptions import ObjectDoesNotExist
 from django.http import JsonResponse
 from django.utils.decorators import method_decorator
 from django.views.decorators.csrf import csrf_exempt
 
 from ..compat import login_not_required
-from ..models import get_access_token_model
+from ..models import get_access_token_model, hash_access_token
+from ..settings import oauth2_settings
 from ..views.generic import ClientProtectedScopedResourceView
 
 
@@ -31,29 +32,30 @@ class IntrospectTokenView(ClientProtectedScopedResourceView):
                 {"error": "invalid_request", "error_description": "Token parameter is missing."},
                 status=400,
             )
-        try:
-            token_checksum = hashlib.sha256(token_value.encode("utf-8")).hexdigest()
-            token = (
-                get_access_token_model()
-                .objects.select_related("user", "application")
-                .get(token_checksum=token_checksum)
-            )
-        except ObjectDoesNotExist:
-            return JsonResponse({"active": False}, status=200)
-        else:
-            if token.is_valid():
-                data = {
-                    "active": True,
-                    "scope": token.scope,
-                    "exp": int(calendar.timegm(token.expires.timetuple())),
-                }
-                if token.application:
-                    data["client_id"] = token.application.client_id
-                if token.user:
-                    data["username"] = token.user.get_username()
-                return JsonResponse(data)
+        cache_timeout = oauth2_settings.INTROSPECTION_CACHE_SECONDS
+        cache_key = f"oauth2_provider:introspect:{hash_access_token(token_value)}"
+        data = cache.get(cache_key) if cache_timeout else None
+        if data is None:
+            try:
+                token = get_access_token_model().get_by_token(token_value)
+            except ObjectDoesNotExist:
+                data = {"active": False}
             else:
-                return JsonResponse({"active": False}, status=200)
+                if token.is_valid():
+                    data = {
+                        "active": True,
+                        "scope": token.scope,
+                        "exp": int(calendar.timegm(token.expires.timetuple())),
+                    }
+                    if token.application:
+                        data["client_id"] = token.application.client_id
+                    if token.user:
+                        data["username"] = token.user.get_username()
+                else:
+                    data = {"active": False}
+            if cache_timeout:
+                cache.set(cache_key, data, timeout=cache_timeout)
+        return JsonResponse(data, status=200)
 
     def get(self, request, *args, **kwargs):
         """

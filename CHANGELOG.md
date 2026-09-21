@@ -15,6 +15,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [unreleased]
 
+### Changed
+* Access tokens are now stored as a self-describing SHA-256 digest (`sha256$<hexdigest>`) in the
+  `token` field instead of plaintext; the redundant `token_checksum` field and its unique constraint
+  (a source of database deadlocks under concurrent inserts) have been removed. Migration `0015`
+  converts existing tokens in place, so previously issued bearer tokens remain valid. Token lookups
+  are centralized in the new `AbstractAccessToken.get_by_token()` classmethod.
+
+### Added
+* New `INTROSPECTION_CACHE_SECONDS` setting (default `60`): the introspection endpoint caches its
+  responses to avoid repeated database lookups when the same token is introspected repeatedly.
+  Set to `0` to disable.
+
 ### Deprecated
 * Deprecate the `AUTHENTICATION_SERVER_EXP_TIME_ZONE` setting. Token introspection `exp` values are
   Unix timestamps and are always interpreted as UTC per RFC 7662/RFC 7519. The setting still works

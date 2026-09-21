@@ -1,5 +1,4 @@
 import datetime
-import hashlib
 
 from django.contrib.auth import get_user_model
 from django.test import RequestFactory
@@ -53,13 +52,11 @@ class TestOAuth2ExtraTokenMiddleware(TestCase):
         """Test that valid bearer token works correctly"""
         # Create a valid access token
         token_string = "test-token-12345"
-        token_checksum = hashlib.sha256(token_string.encode("utf-8")).hexdigest()
         access_token = AccessToken.objects.create(
             user=self.user,
             scope="read",
             expires=datetime.datetime.now() + datetime.timedelta(days=1),
             token=token_string,
-            token_checksum=token_checksum,
             application=self.application,
         )
 

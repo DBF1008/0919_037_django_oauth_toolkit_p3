@@ -92,7 +92,7 @@ class TestClientCredential(BaseTest):
         self.assertEqual(response.status_code, 200)
 
         content = json.loads(response.content.decode("utf-8"))
-        access_token = AccessToken.objects.get(token=content["access_token"])
+        access_token = AccessToken.get_by_token(content["access_token"])
         self.assertIsNone(access_token.user)
 
 

@@ -116,6 +116,8 @@ DEFAULTS = {
     "RESOURCE_SERVER_AUTH_TOKEN": None,
     "RESOURCE_SERVER_INTROSPECTION_CREDENTIALS": None,
     "RESOURCE_SERVER_TOKEN_CACHING_SECONDS": 36000,
+    # How long the introspection endpoint caches its responses (0 disables caching)
+    "INTROSPECTION_CACHE_SECONDS": 60,
     # Deprecated: introspection ``exp`` values are Unix timestamps interpreted as UTC per RFC 7662/
     # RFC 7519. Setting a non-UTC time zone re-enables the legacy workaround of reinterpreting the
     # ``exp`` wall-clock time in the configured time zone. Configuring it emits a DeprecationWarning

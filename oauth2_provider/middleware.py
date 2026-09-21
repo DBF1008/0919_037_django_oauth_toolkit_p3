@@ -1,4 +1,3 @@
-import hashlib
 import logging
 
 from django.contrib.auth import authenticate
@@ -57,8 +56,7 @@ class OAuth2ExtraTokenMiddleware:
             tokenstring = splits[1]
             AccessToken = get_access_token_model()
             try:
-                token_checksum = hashlib.sha256(tokenstring.encode("utf-8")).hexdigest()
-                token = AccessToken.objects.get(token_checksum=token_checksum)
+                token = AccessToken.get_by_token(tokenstring)
                 request.access_token = token
             except AccessToken.DoesNotExist as e:
                 log.exception(e)

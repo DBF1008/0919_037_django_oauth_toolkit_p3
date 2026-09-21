@@ -132,7 +132,7 @@ class TestScopesSave(BaseTest):
         content = json.loads(response.content.decode("utf-8"))
         access_token = content["access_token"]
 
-        at = AccessToken.objects.get(token=access_token)
+        at = AccessToken.get_by_token(access_token)
         self.assertEqual(at.scope, "scope1 scope2")
 
 

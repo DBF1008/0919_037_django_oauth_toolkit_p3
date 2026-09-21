@@ -329,16 +329,53 @@ class TestAccessTokenModel(BaseTestModels):
         self.assertIsNone(access_token.expires)
         self.assertTrue(access_token.is_expired())
 
-    def test_token_checksum_field(self):
+    def test_token_field_stores_sha256_digest(self):
         token = secrets.token_urlsafe(32)
         access_token = AccessToken.objects.create(
             user=self.user,
             token=token,
             expires=timezone.now() + timedelta(hours=1),
         )
-        expected_checksum = hashlib.sha256(token.encode()).hexdigest()
+        expected_checksum = "sha256$" + hashlib.sha256(token.encode()).hexdigest()
 
-        self.assertEqual(access_token.token_checksum, expected_checksum)
+        access_token.refresh_from_db()
+        self.assertEqual(access_token.token, expected_checksum)
+
+    def test_token_field_does_not_store_plaintext(self):
+        token = secrets.token_urlsafe(32)
+        access_token = AccessToken.objects.create(
+            user=self.user,
+            token=token,
+            expires=timezone.now() + timedelta(hours=1),
+        )
+        access_token.refresh_from_db()
+        self.assertNotEqual(access_token.token, token)
+        self.assertTrue(access_token.token.startswith("sha256$"))
+
+    def test_token_field_hashing_is_idempotent(self):
+        token = secrets.token_urlsafe(32)
+        access_token = AccessToken.objects.create(
+            user=self.user,
+            token=token,
+            expires=timezone.now() + timedelta(hours=1),
+        )
+        access_token.refresh_from_db()
+        stored_token = access_token.token
+        # re-saving an instance loaded from the database must not hash the digest again
+        access_token.save()
+        access_token.refresh_from_db()
+        self.assertEqual(access_token.token, stored_token)
+
+    def test_get_by_token(self):
+        token = secrets.token_urlsafe(32)
+        access_token = AccessToken.objects.create(
+            user=self.user,
+            token=token,
+            expires=timezone.now() + timedelta(hours=1),
+        )
+        self.assertEqual(AccessToken.get_by_token(token).pk, access_token.pk)
+        with self.assertRaises(AccessToken.DoesNotExist):
+            AccessToken.get_by_token(secrets.token_urlsafe(32))
 
 
 class TestRefreshTokenModel(BaseTestModels):

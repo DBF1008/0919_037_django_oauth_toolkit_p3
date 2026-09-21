@@ -290,8 +290,8 @@ class TestDeviceFlow(DeviceFlowBaseTestCase):
         }
 
         # ensure the access token and refresh token have the same user as the device that just authenticated
-        access_token: oauth2_provider.models.AccessToken = AccessToken.objects.get(
-            token=token_data["access_token"]
+        access_token: oauth2_provider.models.AccessToken = AccessToken.get_by_token(
+            token_data["access_token"]
         )
         assert access_token.user == device.user
 

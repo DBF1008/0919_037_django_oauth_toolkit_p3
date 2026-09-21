@@ -49,7 +49,45 @@ class ClientSecretField(models.CharField):
         return super().pre_save(model_instance, add)
 
 
+ACCESS_TOKEN_HASH_PREFIX = "sha256$"
+
+
+def hash_access_token(token):
+    """
+    Return the stored representation of a plaintext access token.
+
+    Access tokens are stored as a self-describing SHA-256 digest
+    (``sha256$<hexdigest>``) so that plaintext tokens never hit the
+    database. The prefix makes the value idempotent when re-saving
+    instances loaded from the database.
+    """
+    return "{}{}".format(ACCESS_TOKEN_HASH_PREFIX, hashlib.sha256(token.encode("utf-8")).hexdigest())
+
+
+class HashedTokenField(models.CharField):
+    """
+    CharField that stores the SHA-256 digest of the assigned plaintext
+    token instead of the token itself.
+
+    Values already carrying the ``sha256$`` prefix (e.g. instances loaded
+    from the database) are stored unchanged, so re-saving a model never
+    hashes an already-hashed value.
+    """
+
+    def pre_save(self, model_instance, add):
+        token = getattr(model_instance, self.attname)
+        if token and not token.startswith(ACCESS_TOKEN_HASH_PREFIX):
+            return hash_access_token(token)
+        return super().pre_save(model_instance, add)
+
+
 class TokenChecksumField(models.CharField):
+    """
+    Legacy field kept so that historical migrations (e.g. 0012) remain
+    importable and replayable. The ``token_checksum`` column was removed
+    by migration 0015 in favour of storing the digest in ``token``.
+    """
+
     def pre_save(self, model_instance, add):
         token = getattr(model_instance, "token")
         checksum = hashlib.sha256(token.encode("utf-8")).hexdigest()
@@ -380,7 +418,7 @@ class AbstractAccessToken(models.Model):
 
     * :attr:`user` The Django user representing resources" owner
     * :attr:`source_refresh_token` If from a refresh, the consumed RefeshToken
-    * :attr:`token` Access token
+    * :attr:`token` Access token, stored as a SHA-256 digest (never plaintext)
     * :attr:`application` Application instance
     * :attr:`expires` Date and time of token expiration, in DateTime format
     * :attr:`scope` Allowed scopes
@@ -402,13 +440,7 @@ class AbstractAccessToken(models.Model):
         null=True,
         related_name="refreshed_access_token",
     )
-    token = models.TextField()
-    token_checksum = TokenChecksumField(
-        max_length=64,
-        blank=False,
-        unique=True,
-        db_index=True,
-    )
+    token = HashedTokenField(max_length=71, unique=True)
     id_token = models.OneToOneField(
         oauth2_settings.ID_TOKEN_MODEL,
         on_delete=models.CASCADE,
@@ -435,6 +467,18 @@ class AbstractAccessToken(models.Model):
         :param scopes: An iterable containing the scopes to check or None
         """
         return not self.is_expired() and self.allow_scopes(scopes)
+
+    @classmethod
+    def get_by_token(cls, token):
+        """
+        Return the access token instance for a plaintext token value.
+
+        The plaintext token is hashed and looked up against the stored
+        digest. Raises ``cls.DoesNotExist`` if no token matches.
+
+        :param token: The plaintext access token value.
+        """
+        return cls.objects.select_related("application", "user").get(token=hash_access_token(token))
 
     def is_expired(self):
         """

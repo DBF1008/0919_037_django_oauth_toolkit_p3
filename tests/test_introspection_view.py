@@ -3,6 +3,7 @@ import datetime
 
 import pytest
 from django.contrib.auth import get_user_model
+from django.core.cache import cache
 from django.db import router
 from django.urls import reverse
 from django.utils import timezone
@@ -361,3 +362,51 @@ class TestTokenIntrospectionViews(TestCase):
         token_database = router.db_for_write(AccessToken)
         with self.assertNumQueries(1, using=token_database):
             self.client.post(reverse("oauth2_provider:introspect"))
+
+    def test_repeated_introspection_is_served_from_cache(self):
+        """
+        Test that introspecting the same token twice only queries the
+        database once; the second response is served from the cache.
+        """
+        auth_headers = {
+            "HTTP_AUTHORIZATION": "Bearer " + self.resource_server_token.token,
+        }
+        response = self.client.post(
+            reverse("oauth2_provider:introspect"), {"token": self.valid_token.token}, **auth_headers
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["active"])
+
+        # delete the token: a cached response is still returned for the
+        # remaining cache lifetime instead of hitting the database again
+        self.valid_token.delete()
+        try:
+            response = self.client.post(
+                reverse("oauth2_provider:introspect"), {"token": self.valid_token.token}, **auth_headers
+            )
+            self.assertEqual(response.status_code, 200)
+            self.assertTrue(response.json()["active"])
+        finally:
+            cache.clear()
+
+    def test_introspection_cache_can_be_disabled(self):
+        """
+        Test that no introspection response is cached when
+        INTROSPECTION_CACHE_SECONDS is 0.
+        """
+        self.oauth2_settings.INTROSPECTION_CACHE_SECONDS = 0
+        auth_headers = {
+            "HTTP_AUTHORIZATION": "Bearer " + self.resource_server_token.token,
+        }
+        response = self.client.post(
+            reverse("oauth2_provider:introspect"), {"token": self.valid_token.token}, **auth_headers
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["active"])
+
+        self.valid_token.delete()
+        response = self.client.post(
+            reverse("oauth2_provider:introspect"), {"token": self.valid_token.token}, **auth_headers
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.json()["active"])

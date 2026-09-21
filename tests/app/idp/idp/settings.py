@@ -220,6 +220,8 @@ OAUTH2_PROVIDER = {
         "openid": "OpenID Connect scope",
     },
     "ALLOWED_SCHEMES": env("OAUTH2_PROVIDER_ALLOWED_SCHEMES"),
+    # cache introspection responses for a short time to reduce database load
+    "INTROSPECTION_CACHE_SECONDS": 60,
 }
 # needs to be set to allow cors requests from the test app, along with ALLOWED_SCHEMES=["http"]
 os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = env("OAUTHLIB_INSECURE_TRANSPORT")
