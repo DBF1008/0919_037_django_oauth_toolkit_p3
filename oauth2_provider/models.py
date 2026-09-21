@@ -49,12 +49,48 @@ class ClientSecretField(models.CharField):
         return super().pre_save(model_instance, add)
 
 
+def hash_token(token):
+    """
+    Return the SHA-256 hex digest of the given plain text token value.
+
+    Access tokens are stored in the database only in this hashed form.
+    """
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
 class TokenChecksumField(models.CharField):
+    """
+    Kept for backwards compatibility with historical migrations only.
+
+    The ``token_checksum`` field has been removed from ``AbstractAccessToken``;
+    the ``token`` field itself now stores the SHA-256 hash of the token.
+    """
+
     def pre_save(self, model_instance, add):
         token = getattr(model_instance, "token")
-        checksum = hashlib.sha256(token.encode("utf-8")).hexdigest()
-        setattr(model_instance, self.attname, checksum)
+        setattr(model_instance, self.attname, hash_token(token))
         return super().pre_save(model_instance, add)
+
+
+class TokenHashField(models.CharField):
+    """
+    A field that persists only the SHA-256 hash of the assigned token value.
+
+    The plain text value remains available on the model instance, but only its
+    hash is ever written to the database. Values that already look like a
+    SHA-256 hex digest are stored unchanged so that re-saving an instance
+    loaded from the database does not hash the value twice.
+    """
+
+    def pre_save(self, model_instance, add):
+        value = getattr(model_instance, self.attname)
+        if value and not self._is_hashed(value):
+            return hash_token(value)
+        return super().pre_save(model_instance, add)
+
+    @staticmethod
+    def _is_hashed(value):
+        return len(value) == 64 and all(c in "0123456789abcdef" for c in value)
 
 
 class AbstractApplication(models.Model):
@@ -371,6 +407,19 @@ class Grant(AbstractGrant):
         swappable = "OAUTH2_PROVIDER_GRANT_MODEL"
 
 
+class AccessTokenManager(models.Manager):
+    def get_by_token(self, token):
+        """
+        Return the access token for the given plain text token value.
+
+        The value is hashed before querying, since only the SHA-256 hash of a
+        token is stored in the database. Returns None if no token matches.
+        """
+        if not token:
+            return None
+        return self.select_related("application", "user").filter(token=hash_token(token)).first()
+
+
 class AbstractAccessToken(models.Model):
     """
     An AccessToken instance represents the actual access token to
@@ -402,13 +451,7 @@ class AbstractAccessToken(models.Model):
         null=True,
         related_name="refreshed_access_token",
     )
-    token = models.TextField()
-    token_checksum = TokenChecksumField(
-        max_length=64,
-        blank=False,
-        unique=True,
-        db_index=True,
-    )
+    token = TokenHashField(max_length=64, unique=True)
     id_token = models.OneToOneField(
         oauth2_settings.ID_TOKEN_MODEL,
         on_delete=models.CASCADE,
@@ -427,6 +470,8 @@ class AbstractAccessToken(models.Model):
 
     created = models.DateTimeField(auto_now_add=True)
     updated = models.DateTimeField(auto_now=True)
+
+    objects = AccessTokenManager()
 
     def is_valid(self, scopes=None):
         """

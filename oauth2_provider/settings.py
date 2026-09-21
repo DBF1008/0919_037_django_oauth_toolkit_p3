@@ -111,6 +111,10 @@ DEFAULTS = {
     # Special settings that will be evaluated at runtime
     "_SCOPES": [],
     "_DEFAULT_SCOPES": [],
+    # Authorization Server token introspection endpoint (RFC 7662):
+    # seconds an introspection response is cached to avoid repeated database
+    # lookups for the same token. 0 disables caching.
+    "INTROSPECT_TOKEN_CACHING_SECONDS": 0,
     # Resource Server with Token Introspection
     "RESOURCE_SERVER_INTROSPECTION_URL": None,
     "RESOURCE_SERVER_AUTH_TOKEN": None,

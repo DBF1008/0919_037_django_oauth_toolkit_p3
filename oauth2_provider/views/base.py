@@ -1,4 +1,3 @@
-import hashlib
 import json
 import logging
 from urllib.parse import parse_qsl, urlencode, urlparse
@@ -303,8 +302,7 @@ class TokenView(OAuthLibMixin, View):
         if status == 200:
             access_token = json.loads(body).get("access_token")
             if access_token is not None:
-                token_checksum = hashlib.sha256(access_token.encode("utf-8")).hexdigest()
-                token = get_access_token_model().objects.get(token_checksum=token_checksum)
+                token = get_access_token_model().objects.get_by_token(access_token)
                 app_authorized.send(sender=self, request=request, token=token)
         response = HttpResponse(content=body, status=status)
 

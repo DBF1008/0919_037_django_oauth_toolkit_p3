@@ -1,6 +1,5 @@
 import base64
 import binascii
-import hashlib
 import http.client
 import inspect
 import json
@@ -30,12 +29,14 @@ from oauthlib.openid import RequestValidator
 
 from .exceptions import FatalClientError
 from .models import (
+    AbstractAccessToken,
     AbstractApplication,
     get_access_token_model,
     get_application_model,
     get_grant_model,
     get_id_token_model,
     get_refresh_token_model,
+    hash_token,
 )
 from .scopes import get_scopes_backend
 from .settings import oauth2_settings
@@ -452,11 +453,9 @@ class OAuth2Validator(RequestValidator):
             if not settings.USE_TZ:
                 expires = timezone.make_naive(expires, expires.tzinfo)
 
-            token_checksum = hashlib.sha256(token.encode("utf-8")).hexdigest()
             access_token, _created = AccessToken.objects.update_or_create(
-                token_checksum=token_checksum,
+                token=hash_token(token),
                 defaults={
-                    "token": token,
                     "user": user,
                     "application": None,
                     "scope": scope,
@@ -499,12 +498,7 @@ class OAuth2Validator(RequestValidator):
             return False
 
     def _load_access_token(self, token):
-        token_checksum = hashlib.sha256(token.encode("utf-8")).hexdigest()
-        return (
-            AccessToken.objects.select_related("application", "user")
-            .filter(token_checksum=token_checksum)
-            .first()
-        )
+        return AccessToken.objects.get_by_token(token)
 
     def validate_code(self, client_id, code, client, request, *args, **kwargs):
         try:
@@ -688,8 +682,10 @@ class OAuth2Validator(RequestValidator):
                     previous_access_token = None
 
                 # If the refresh token has already been used to create an
-                # access token (ie it's within the grace period), return that
-                # access token
+                # access token (ie it's within the grace period), issue a fresh
+                # access token bound to the same, still valid, refresh token.
+                # The previous access token value cannot be returned because
+                # only its hash is stored in the database.
                 if not previous_access_token:
                     access_token = self._create_access_token(
                         expires,
@@ -704,11 +700,11 @@ class OAuth2Validator(RequestValidator):
                 else:
                     # make sure that the token data we're returning matches
                     # the existing token
-                    token["access_token"] = previous_access_token.token
+                    token["scope"] = previous_access_token.scope
+                    self._create_access_token(expires, request, token)
                     token["refresh_token"] = (
                         RefreshToken.objects.filter(access_token=previous_access_token).first().token
                     )
-                    token["scope"] = previous_access_token.scope
 
         # No refresh token should be created, just access token
         else:
@@ -775,11 +771,22 @@ class OAuth2Validator(RequestValidator):
 
         token_type = token_types.get(token_type_hint, AccessToken)
         try:
-            token_type.objects.get(token=token).revoke()
+            self._get_tokens_by_value(token_type, token).get().revoke()
         except ObjectDoesNotExist:
             for other_type in [_t for _t in token_types.values() if _t != token_type]:
                 # slightly inefficient on Python2, but the queryset contains only one instance
-                list(map(lambda t: t.revoke(), other_type.objects.filter(token=token)))
+                list(map(lambda t: t.revoke(), self._get_tokens_by_value(other_type, token)))
+
+    @staticmethod
+    def _get_tokens_by_value(model, token):
+        """
+        Return a queryset of the tokens of ``model`` matching the given plain
+        text token value. Access tokens are stored hashed, refresh tokens are
+        stored in plain text.
+        """
+        if issubclass(model, AbstractAccessToken):
+            return model.objects.filter(token=hash_token(token))
+        return model.objects.filter(token=token)
 
     def validate_user(self, username, password, client, request, *args, **kwargs):
         """
